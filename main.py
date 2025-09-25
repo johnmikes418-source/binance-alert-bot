@@ -183,7 +183,13 @@ def trigger_start():
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_telegram_bot)
-    bot_thread.daemon = True
-    bot_thread.start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    # On Render → use webhook (Flask is optional, you can drop it if you don’t need /ping)
+    if os.getenv("RENDER"):
+        run_telegram_bot()
+    else:
+        # Local dev: run Flask + polling bot together
+        bot_thread = threading.Thread(target=run_telegram_bot)
+        bot_thread.daemon = True
+        bot_thread.start()
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
