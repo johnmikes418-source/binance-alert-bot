@@ -270,7 +270,7 @@ def send_alerts():
 if __name__ == "__main__":
     # ✅ Start scheduler
     scheduler = BackgroundScheduler()
-    scheduler.add_job(send_alerts, "interval", minutes=60)
+    scheduler.add_job(send_alerts, "interval", minutes=60, timezone=pytz.utc)
     scheduler.start()
 
     # ✅ Start Flask app to keep Render alive
