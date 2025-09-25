@@ -1,19 +1,19 @@
 import os
 import sys
 import logging
-import requests
+from datetime import datetime, timezone
 import pytz
-from datetime import datetime
+import requests
 from flask import Flask, request
-from apscheduler.schedulers.background import BackgroundScheduler
-import imghdr2 as imghdr
 from bs4 import BeautifulSoup
+import imghdr2 as imghdr
 
-# Fix PIL/telegram bug
+from apscheduler.schedulers.background import BackgroundScheduler
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, CallbackContext
+
+# Patch telegram bug
 sys.modules["imghdr"] = imghdr
-
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, CallbackContext
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,13 +30,13 @@ bot.set_webhook(url=WEBHOOK_URL)
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------------- HEALTH ROUTE ----------------
+# ---------------- DISPATCHER ----------------
+dispatcher = Dispatcher(bot, None, workers=1)
+
+# ---------------- ROUTES ----------------
 @app.route("/")
 def home():
     return "✅ Bot is running", 200
-
-# ---------------- WEBHOOK ROUTE ----------------
-dispatcher = Dispatcher(bot, None, workers=0)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -45,13 +45,7 @@ def webhook():
         dispatcher.process_update(update)
         return "Webhook received", 200
 
-# ---------------- HANDLERS ----------------
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("👋 Welcome! This bot sends new and upcoming crypto alerts hourly.")
-
-dispatcher.add_handler(CommandHandler("start", start))
-
-# ---------------- HELPERS ----------------
+# ---------------- FETCH SUPPLY ----------------
 def fetch_max_supply(symbol):
     try:
         url = f"https://coinmarketcap.com/currencies/{symbol.lower()}/"
@@ -69,8 +63,8 @@ def fetch_max_supply(symbol):
         logging.warning(f"Supply fetch failed for {symbol}: {e}")
     return None
 
-# ---------------- FETCHERS ----------------
-def fetch_cmc_new(limit=20):
+# ---------------- FETCH CRYPTOS ----------------
+def fetch_cmc_new(limit=30):
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
@@ -97,27 +91,25 @@ def fetch_cmc_new(limit=20):
 
             supply = fetch_max_supply(symbol)
 
-            tokens.append(
-                {
-                    "name": name,
-                    "symbol": symbol,
-                    "price": price,
-                    "change": change,
-                    "supply": supply,
-                }
-            )
+            tokens.append({
+                "name": name,
+                "symbol": symbol,
+                "price": price,
+                "change": change,
+                "supply": supply,
+            })
         return tokens
     except Exception as e:
         logging.error(f"CMC /new scrape error: {e}")
         return []
 
-def fetch_cmc_upcoming(limit=20):
+def fetch_cmc_upcoming(limit=30):
     try:
         r = requests.get(CMC_UPCOMING_URL, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        results = []
+        tokens = []
         rows = soup.select("table tbody tr")
         for row in rows[:limit]:
             cols = row.find_all("td")
@@ -130,68 +122,63 @@ def fetch_cmc_upcoming(limit=20):
             name = name_elem.get_text(strip=True) if name_elem else "Unknown"
             symbol = name.split(" ")[-1].replace("(", "").replace(")", "")
 
-            listing_date = None
+            date = None
             try:
-                listing_date = datetime.strptime(date_elem, "%b %d, %Y")
-                listing_date = listing_date.replace(tzinfo=pytz.utc)
-            except Exception:
+                date = datetime.strptime(date_elem, "%b %d, %Y")
+                date = date.replace(tzinfo=timezone.utc)
+            except:
                 pass
 
-            results.append(
-                {
-                    "name": name,
-                    "symbol": symbol,
-                    "date": listing_date,
-                    "url": CMC_UPCOMING_URL,
-                    "source": "CMC Upcoming",
-                }
-            )
-        return results
+            tokens.append({
+                "name": name,
+                "symbol": symbol,
+                "date": date,
+                "url": CMC_UPCOMING_URL,
+                "source": "CMC Upcoming",
+            })
+        return tokens
     except Exception as e:
         logging.error(f"CMC /upcoming scrape error: {e}")
         return []
 
-def fetch_binance_alpha(limit=20):
+def fetch_binance_alpha(limit=30):
     try:
         r = requests.get(BINANCE_ALPHA_URL, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        results = []
+        tokens = []
         cards = soup.select("a[href*='/en/trade/']")
         for card in cards[:limit]:
             name = card.get("title", "Unknown")
             symbol = name.split(" ")[0]
             url = "https://www.binance.com" + card["href"]
 
+            date = None
             date_elem = card.find("div", string=lambda t: t and any(y in t for y in ["2025", "2026"]))
-            listing_date = None
             if date_elem:
                 try:
-                    listing_date = datetime.strptime(date_elem.get_text(strip=True), "%Y-%m-%d")
-                    listing_date = listing_date.replace(tzinfo=pytz.utc)
+                    date = datetime.strptime(date_elem.get_text(strip=True), "%Y-%m-%d")
+                    date = date.replace(tzinfo=timezone.utc)
                 except:
                     pass
 
-            results.append(
-                {
-                    "name": name,
-                    "symbol": symbol,
-                    "date": listing_date,
-                    "url": url,
-                    "source": "Binance Alpha",
-                }
-            )
-        return results
+            tokens.append({
+                "name": name,
+                "symbol": symbol,
+                "date": date,
+                "url": url,
+                "source": "Binance Alpha",
+            })
+        return tokens
     except Exception as e:
         logging.error(f"Binance Alpha scrape error: {e}")
         return []
 
 # ---------------- FILTERS ----------------
-def token_filter(token):
-    price = token["price"]
-    supply = token["supply"]
-
+def token_filter(t):
+    price = t["price"]
+    supply = t["supply"]
     if supply:
         if supply <= 1_000_000_000 and 0.005 <= price <= 0.05:
             return True
@@ -210,20 +197,21 @@ def alpha_filter(token):
             return False
     return True
 
-# ---------------- ALERTS ----------------
+# ---------------- LINKS ----------------
 def cmc_link(symbol):
     return f"https://coinmarketcap.com/currencies/{symbol.lower()}/"
 
 def dexscreener_link(symbol):
     return f"https://dexscreener.com/search?q={symbol}"
 
+# ---------------- ALERTS ----------------
 def new_crypto_alert():
-    fresh = [t for t in fetch_cmc_new(30) if token_filter(t)]
+    fresh = [t for t in fetch_cmc_new() if token_filter(t)]
     if not fresh:
         return "✅ No new cryptos match your filters."
 
     msg = f"🆕 New Crypto Alerts\n{datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-    for i, t in enumerate(fresh, start=1):
+    for i, t in enumerate(fresh, 1):
         supply_str = f"{t['supply']:,}" if t["supply"] else "?"
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']}/USDT)\n"
@@ -235,16 +223,15 @@ def new_crypto_alert():
     return msg
 
 def alpha_alert():
-    cmc = [t for t in fetch_cmc_upcoming(30) if alpha_filter(t)]
-    binance = [t for t in fetch_binance_alpha(20) if alpha_filter(t)]
-
+    cmc = [t for t in fetch_cmc_upcoming() if alpha_filter(t)]
+    binance = [t for t in fetch_binance_alpha() if alpha_filter(t)]
     alphas = cmc + binance
     if not alphas:
         return "🚀 No valid upcoming listings right now."
 
-    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-    for i, t in enumerate(alphas, start=1):
-        date_str = t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown date"
+    msg = f"🚀 New Alpha Alerts\n{datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    for i, t in enumerate(alphas, 1):
+        date_str = t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown"
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']})\n"
             f"📅 First Listing: {date_str}\n"
@@ -260,7 +247,32 @@ def send_alerts():
     except Exception as e:
         logging.error(f"Telegram alert failed: {e}")
 
-# ---------------- MAIN ----------------
+# ---------------- BUTTONS + HANDLERS ----------------
+def start(update: Update, context: CallbackContext):
+    keyboard = [
+        [
+            InlineKeyboardButton("🆕 New Crypto Alerts", callback_data="new"),
+            InlineKeyboardButton("🚀 Alpha Alerts", callback_data="alpha"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(
+        "👋 Welcome! This bot sends crypto alerts hourly.\n\nChoose an action:",
+        reply_markup=reply_markup
+    )
+
+def button_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    if query.data == "new":
+        query.edit_message_text(new_crypto_alert(), parse_mode="Markdown", disable_web_page_preview=True)
+    elif query.data == "alpha":
+        query.edit_message_text(alpha_alert(), parse_mode="Markdown", disable_web_page_preview=True)
+
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CallbackQueryHandler(button_callback))
+
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_alerts, "interval", minutes=60, timezone=pytz.utc)
