@@ -114,11 +114,14 @@ def token_filter(token):
     supply = token["supply"]
 
     if supply:
-        if supply <= 1_000_000_000 and 0.02 <= price <= 0.05:
+        # Case 1: Small supply
+        if supply <= 1_000_000_000 and 0.01 <= price <= 0.05:
             return True
-        if supply <= 10_000_000_000 and 0.002 <= price <= 0.005:
+        # Case 2: Larger supply
+        if supply <= 10_000_000_000 and 0.001 <= price <= 0.005:
             return True
     return False
+
 
 # ---------------- ALERTS ----------------
 def cmc_link(symbol):
