@@ -74,6 +74,8 @@ def fetch_cmc_new(limit=20):
         return []
 
 
+from dateutil import parser
+
 def fetch_cmc_upcoming(limit=20):
     """Scrape upcoming tokens from CoinMarketCap /upcoming/ page"""
     try:
@@ -82,6 +84,8 @@ def fetch_cmc_upcoming(limit=20):
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
+        now = datetime.now(UTC)
+
         rows = soup.select("table tbody tr")
         for row in rows[:limit]:
             cols = row.find_all("td")
@@ -95,14 +99,21 @@ def fetch_cmc_upcoming(limit=20):
             symbol = name.split(" ")[-1].replace("(", "").replace(")", "")
             date_text = date_elem.get_text(strip=True)
 
-            results.append(
-                {
-                    "name": name,
-                    "symbol": symbol,
-                    "date": date_text,
-                    "url": CMC_UPCOMING_URL,
-                }
-            )
+            try:
+                listing_time = parser.parse(date_text)
+            except Exception:
+                listing_time = None
+
+            # ✅ Only keep upcoming listings (within next 30 days)
+            if listing_time and now < listing_time <= now + timedelta(days=30):
+                results.append(
+                    {
+                        "name": name,
+                        "symbol": symbol,
+                        "date": listing_time,
+                        "url": CMC_UPCOMING_URL,
+                    }
+                )
         return results
     except Exception as e:
         logging.error(f"CMC /upcoming scrape error: {e}")
@@ -148,13 +159,13 @@ def new_crypto_alert():
 def alpha_alert():
     alphas = fetch_cmc_upcoming(30)
     if not alphas:
-        return "🚀 No upcoming CMC listings right now."
+        return "🚀 No valid CMC Alpha listings (within 30 days)."
 
-    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🚀 New Alpha Alerts (Upcoming Listings ≤30 days)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(alphas, start=1):
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']})\n"
-            f"📅 First Listing: {t['date']}\n"
+            f"📅 Listing: {t['date'].strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"📌 More Info: [CMC Upcoming]({t['url']})\n\n"
         )
     return msg
