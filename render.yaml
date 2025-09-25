@@ -6,10 +6,11 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    pythonVersion: 3.12.6   # 👈 must be aligned with startCommand
     envVars:
       - key: BOT_TOKEN
         sync: false
       - key: CHAT_ID
         sync: false
-   pythonVersion: 3.12.6
-
+      - key: PORT
+        value: 5000
