@@ -3,10 +3,10 @@ import sys
 import requests
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from flask import Flask, request
 import imghdr2 as imghdr
-from bs4 import BeautifulSoup  # for fallback scraping
+from bs4 import BeautifulSoup
 
 # Fix PIL/telegram bug
 sys.modules["imghdr"] = imghdr
@@ -20,7 +20,8 @@ CHAT_ID = os.getenv("CHAT_ID")
 CMC_KEY = os.getenv("COINMARKETCAP_KEY")
 
 CMC_API = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-CMC_NEW_URL = "https://coinmarketcap.com/new/"  # fallback scrape
+CMC_NEW_URL = "https://coinmarketcap.com/new/"
+BINANCE_ALPHA_URL = "https://www.binance.com/en/support/announcement/list/48"
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
@@ -30,7 +31,6 @@ logging.basicConfig(level=logging.INFO)
 
 # ---------------- FETCHERS ----------------
 def fetch_cmc(limit=50):
-    """Fetch tokens from CMC API"""
     headers = {"X-CMC_PRO_API_KEY": CMC_KEY}
     try:
         r = requests.get(
@@ -52,12 +52,14 @@ def fetch_cmc(limit=50):
             listed = None
             if listed_str:
                 try:
-                    listed = datetime.fromisoformat(listed_str.replace("Z", ""))
+                    listed = datetime.fromisoformat(listed_str.replace("Z", "+00:00"))
                 except Exception:
                     listed = None
 
             tokens.append(
                 {
+                    "id": x.get("id"),
+                    "name": x.get("name"),
                     "symbol": x.get("symbol", "UNK"),
                     "price": float(x["quote"]["USD"]["price"]),
                     "change": float(x["quote"]["USD"]["percent_change_24h"]),
@@ -71,7 +73,6 @@ def fetch_cmc(limit=50):
 
 
 def fetch_cmc_fallback():
-    """Scrape CoinMarketCap new listings as fallback"""
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
@@ -91,11 +92,13 @@ def fetch_cmc_fallback():
 
             tokens.append(
                 {
+                    "id": None,
+                    "name": symbol,
                     "symbol": symbol,
                     "price": price,
                     "change": change,
                     "supply": None,
-                    "listed": datetime.utcnow(),  # fallback has no date
+                    "listed": datetime.now(UTC),
                 }
             )
         return tokens
@@ -104,9 +107,27 @@ def fetch_cmc_fallback():
         return []
 
 
+def fetch_binance_alpha():
+    """Scrape Binance announcement page for upcoming token listings"""
+    try:
+        r = requests.get(BINANCE_ALPHA_URL, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        results = []
+        for link in soup.select("a.css-1ej4hfo"):  # Binance uses dynamic CSS classes
+            title = link.get_text(strip=True)
+            href = "https://www.binance.com" + link.get("href")
+            if "Will List" in title:  # filter only token listing announcements
+                results.append({"title": title, "url": href})
+        return results
+    except Exception as e:
+        logging.error(f"Binance Alpha scrape error: {e}")
+        return []
+
+
 # ---------------- FILTERS ----------------
 def token_filter(token):
-    """Supply–price filter"""
     price = token["price"]
     supply = token["supply"]
 
@@ -119,56 +140,50 @@ def token_filter(token):
 
 
 def is_new_crypto(token):
-    """≤ 60 days old + passes filter"""
     listed = token.get("listed")
     if not listed:
         return False
-    age = datetime.utcnow() - listed
+    age = datetime.now(UTC) - listed
     return age <= timedelta(days=60) and token_filter(token)
 
 
-def is_alpha(token):
-    """≤ 7 days old (ignore filter)"""
-    listed = token.get("listed")
-    if not listed:
-        return False
-    age = datetime.utcnow() - listed
-    return age <= timedelta(days=7)
-
-
 # ---------------- ALERTS ----------------
-def check_tokens():
-    results = []
-    for token in fetch_cmc(100):
-        if abs(token["change"]) >= 5 and token_filter(token):
-            results.append(token)
+def cmc_link(token):
+    return f"https://coinmarketcap.com/currencies/{token['id']}/" if token["id"] else "https://coinmarketcap.com/new/"
 
-    if not results:
-        return "✅ No tokens match criteria right now."
 
-    msg = f"📊 Token Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
-    for t in results:
-        msg += f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%\n"
-    return msg
+def dexscreener_link(symbol):
+    return f"https://dexscreener.com/search?q={symbol}"
 
 
 def new_crypto_alert():
     fresh = [t for t in fetch_cmc(100) if is_new_crypto(t)]
     if not fresh:
-        return "✅ No new cryptos in last 60 days match your filters."
-    msg = f"🆕 New Crypto (≤60 days) ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
-    for t in fresh:
-        msg += f"🔹 {t['symbol']} | 💵 ${t['price']:.6f}\n"
+        return "✅ No new cryptos (≤60 days) match your filters."
+
+    msg = f"🆕 New Crypto Alerts (≤60 days)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    for i, t in enumerate(fresh, start=1):
+        msg += (
+            f"{i}. 💎 {t['name']} ({t['symbol']}/USDT)\n"
+            f"💰 Price: ${t['price']:.6f}\n"
+            f"📈 24h Change: {t['change']:+.2f}%\n"
+            f"🔢 Supply: {t['supply']:,}\n"
+            f"🔗 [CMC]({cmc_link(t)}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
+        )
     return msg
 
 
 def alpha_alert():
-    alphas = [t for t in fetch_cmc(100) if is_alpha(t)]
+    alphas = fetch_binance_alpha()
     if not alphas:
-        return "🚀 No new alpha listings yet."
-    msg = f"🚀 New Alpha Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
-    for t in alphas:
-        msg += f"🔹 {t['symbol']} | Listed recently!\n"
+        return "🚀 No upcoming Binance Alpha listings right now."
+
+    msg = f"🚀 New Alpha Alerts (Upcoming Binance Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    for i, t in enumerate(alphas, start=1):
+        msg += (
+            f"{i}. 💎 {t['title']}\n"
+            f"🔗 [More Info]({t['url']})\n\n"
+        )
     return msg
 
 
@@ -176,8 +191,6 @@ def alpha_alert():
 def main_menu():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
-            [InlineKeyboardButton("💰 CMC Top", callback_data="cmc")],
             [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
             [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
         ]
@@ -192,7 +205,7 @@ def back_button():
 
 def start_command(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "👋 Welcome! Choose an option:", reply_markup=main_menu()
+        "👋 Welcome! Choose an option:", reply_markup=main_menu(), parse_mode="Markdown"
     )
 
 
@@ -201,23 +214,19 @@ def button_handler(update: Update, context: CallbackContext):
     query.answer()
 
     if query.data == "menu":
-        query.edit_message_text("👋 Back to menu:", reply_markup=main_menu())
-
-    elif query.data == "check_tokens":
-        query.edit_message_text(check_tokens(), reply_markup=back_button())
-
-    elif query.data == "cmc":
-        data = fetch_cmc(10)
-        msg = "💰 CMC Top Tokens:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
+        query.edit_message_text(
+            "👋 Back to menu:", reply_markup=main_menu(), parse_mode="Markdown"
         )
-        query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "new_crypto":
-        query.edit_message_text(new_crypto_alert(), reply_markup=back_button())
+        query.edit_message_text(
+            new_crypto_alert(), reply_markup=back_button(), parse_mode="Markdown"
+        )
 
     elif query.data == "alpha":
-        query.edit_message_text(alpha_alert(), reply_markup=back_button())
+        query.edit_message_text(
+            alpha_alert(), reply_markup=back_button(), parse_mode="Markdown"
+        )
 
 
 # ---------------- FLASK ----------------
@@ -244,12 +253,12 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start_command))
     dp.add_handler(CallbackQueryHandler(button_handler))
 
-    if HOSTNAME:  # Running on Render
+    if HOSTNAME:
         WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
         logging.info(f"Setting webhook to {WEBHOOK_URL}")
         updater.bot.set_webhook(WEBHOOK_URL)
         app.run(host="0.0.0.0", port=PORT)
-    else:  # Local dev
+    else:
         bot_thread = threading.Thread(target=updater.start_polling)
         bot_thread.daemon = True
         bot_thread.start()
