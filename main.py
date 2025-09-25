@@ -28,9 +28,18 @@ bot = Bot(token=BOT_TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
+# Debug: check env vars
+logging.info(f"BOT_TOKEN loaded? {'Yes' if BOT_TOKEN else 'No'}")
+logging.info(f"CHAT_ID loaded? {'Yes' if CHAT_ID else 'No'}")
+logging.info(f"CMC_KEY loaded? {'Yes' if CMC_KEY else 'No'}")
+
 
 # ---------------- FETCHERS ----------------
 def fetch_cmc(limit=50):
+    if not CMC_KEY:
+        logging.error("❌ No CMC_KEY found in environment variables!")
+        return fetch_cmc_fallback()
+
     headers = {"X-CMC_PRO_API_KEY": CMC_KEY}
     try:
         r = requests.get(
@@ -39,7 +48,11 @@ def fetch_cmc(limit=50):
             headers=headers,
             timeout=10,
         )
-        r.raise_for_status()
+
+        if r.status_code != 200:
+            logging.error(f"❌ CMC API failed: {r.status_code} {r.text}")
+            return fetch_cmc_fallback()
+
         data = r.json().get("data", [])
     except Exception as e:
         logging.error(f"CMC API error: {e}")
@@ -73,6 +86,7 @@ def fetch_cmc(limit=50):
 
 
 def fetch_cmc_fallback():
+    logging.warning("⚠️ Using fallback: scraping CMC /new/")
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
