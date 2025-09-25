@@ -19,12 +19,13 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr"
 COINGECKO_API = "https://api.coingecko.com/api/v3/coins/markets"
-DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
+DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/search"
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
 
 logging.basicConfig(level=logging.INFO)
+
 
 # ---------------- FETCHERS ----------------
 def fetch_binance():
@@ -44,48 +45,81 @@ def fetch_binance():
         logging.error(f"Binance error: {e}")
         return []
 
+
 def fetch_coingecko():
     try:
         r = requests.get(
             COINGECKO_API,
-            params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 50, "page": 1},
+            params={
+                "vs_currency": "usd",
+                "order": "market_cap_desc",
+                "per_page": 50,
+                "page": 1,
+            },
             timeout=10,
         ).json()
-        return [
-            {
-                "symbol": x["symbol"].upper(),
-                "price": float(x["current_price"]),
-                "change": float(x["price_change_percentage_24h"] or 0),
-                "supply": x.get("max_supply") or 0,
-                "listed": x.get("ath_date") or x.get("last_updated"),
-            }
-            for x in r
-        ]
+
+        data = []
+        for x in r:
+            listed_str = (
+                x.get("atl_date")
+                or x.get("ath_date")
+                or x.get("last_updated")
+            )
+            listed = None
+            try:
+                if listed_str:
+                    listed = datetime.fromisoformat(
+                        listed_str.replace("Z", "")
+                    )
+            except Exception:
+                listed = None
+
+            data.append(
+                {
+                    "symbol": x["symbol"].upper(),
+                    "price": float(x.get("current_price") or 0),
+                    "change": float(x.get("price_change_percentage_24h") or 0),
+                    "supply": x.get("max_supply") or 0,
+                    "listed": listed,
+                }
+            )
+        return data
     except Exception as e:
         logging.error(f"Coingecko error: {e}")
         return []
 
+
 def fetch_dexscreener():
     try:
-        tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]  # sample token list
+        tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]  # sample
         data = []
         for t in tokens:
-            r = requests.get(f"{DEXSCREENER_API}/{t}", timeout=10).json()
+            r = requests.get(f"{DEXSCREENER_API}?q={t}", timeout=10).json()
             pairs = r.get("pairs", [])
             for p in pairs:
                 listed = p.get("pairCreatedAt")
-                listed_dt = datetime.utcfromtimestamp(listed // 1000) if listed else None
-                data.append({
-                    "symbol": p.get("baseToken", {}).get("symbol", "UNK"),
-                    "price": float(p.get("priceUsd", 0)),
-                    "change": float(p.get("priceChange", {}).get("h24", 0)),
-                    "supply": None,
-                    "listed": listed_dt,
-                })
+                listed_dt = (
+                    datetime.utcfromtimestamp(listed // 1000)
+                    if listed
+                    else None
+                )
+                data.append(
+                    {
+                        "symbol": p.get("baseToken", {}).get("symbol", "UNK"),
+                        "price": float(p.get("priceUsd") or 0),
+                        "change": float(
+                            p.get("priceChange", {}).get("h24") or 0
+                        ),
+                        "supply": None,
+                        "listed": listed_dt,
+                    }
+                )
         return data
     except Exception as e:
         logging.error(f"Dexscreener error: {e}")
         return []
+
 
 # ---------------- FILTERS ----------------
 def token_filter(token):
@@ -100,31 +134,24 @@ def token_filter(token):
             return True
     return False
 
+
 def is_new_crypto(token):
     """≤ 60 days old + passes filter"""
     listed = token.get("listed")
     if not listed:
         return False
-    if isinstance(listed, str):
-        try:
-            listed = datetime.fromisoformat(listed.replace("Z", ""))
-        except:
-            return False
     age = datetime.utcnow() - listed
     return age <= timedelta(days=60) and token_filter(token)
+
 
 def is_alpha(token):
     """≤ 7 days old (ignore price filter)"""
     listed = token.get("listed")
     if not listed:
         return False
-    if isinstance(listed, str):
-        try:
-            listed = datetime.fromisoformat(listed.replace("Z", ""))
-        except:
-            return False
     age = datetime.utcnow() - listed
     return age <= timedelta(days=7)
+
 
 # ---------------- ALERTS ----------------
 def check_tokens():
@@ -136,47 +163,61 @@ def check_tokens():
     if not results:
         return "✅ No tokens match criteria right now."
 
-    msg = "📊 Token Alerts:\n\n"
+    msg = f"📊 Token Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
     for t in results:
-        msg += f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%\n"
+        msg += (
+            f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%\n"
+        )
     return msg
+
 
 def new_crypto_alert():
     data = fetch_coingecko() + fetch_dexscreener()
     fresh = [t for t in data if is_new_crypto(t)]
     if not fresh:
         return "✅ No new cryptos in last 60 days match your filters."
-    msg = "🆕 New Crypto (≤60 days):\n\n"
+    msg = f"🆕 New Crypto (≤60 days) ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
     for t in fresh:
         msg += f"🔹 {t['symbol']} | 💵 ${t['price']:.6f}\n"
     return msg
+
 
 def alpha_alert():
     data = fetch_coingecko() + fetch_dexscreener()
     alphas = [t for t in data if is_alpha(t)]
     if not alphas:
         return "🚀 No new alpha listings yet."
-    msg = "🚀 New Alpha Alerts:\n\n"
+    msg = f"🚀 New Alpha Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
     for t in alphas:
         msg += f"🔹 {t['symbol']} | Listed recently!\n"
     return msg
 
+
 # ---------------- TELEGRAM ----------------
 def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
-        [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
-        [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
-        [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
-        [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
-        [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
-    ])
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
+            [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
+            [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
+            [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
+            [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
+            [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
+        ]
+    )
+
 
 def back_button():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]]
+    )
+
 
 def start_command(update: Update, context: CallbackContext):
-    update.message.reply_text("👋 Welcome! Choose an option:", reply_markup=main_menu())
+    update.message.reply_text(
+        "👋 Welcome! Choose an option:", reply_markup=main_menu()
+    )
+
 
 def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -191,21 +232,30 @@ def button_handler(update: Update, context: CallbackContext):
     elif query.data == "binance":
         data = fetch_binance()[:5]
         msg = "📊 Binance Top Tokens:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
+            [
+                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
+                for t in data
+            ]
         )
         query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "coingecko":
         data = fetch_coingecko()[:5]
         msg = "🌐 CoinGecko Top:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
+            [
+                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
+                for t in data
+            ]
         )
         query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "dexscreener":
         data = fetch_dexscreener()
         msg = "🦄 Dexscreener:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
+            [
+                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
+                for t in data
+            ]
         )
         query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
@@ -215,10 +265,12 @@ def button_handler(update: Update, context: CallbackContext):
     elif query.data == "alpha":
         query.edit_message_text(alpha_alert(), reply_markup=back_button())
 
+
 # ---------------- FLASK ----------------
 @app.route("/")
 def home():
     return "Bot is running!"
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -226,6 +278,7 @@ def webhook():
     dispatcher = updater.dispatcher
     dispatcher.process_update(update)
     return "ok"
+
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
