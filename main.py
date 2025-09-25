@@ -17,9 +17,7 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, Callback
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-CMC_KEY = os.getenv("COINMARKETCAP_KEY")
 
-CMC_API = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 CMC_NEW_URL = "https://coinmarketcap.com/new/"
 BINANCE_ALPHA_URL = "https://www.binance.com/en/support/announcement/list/48"
 
@@ -28,65 +26,9 @@ bot = Bot(token=BOT_TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
-# Debug: check env vars
-logging.info(f"BOT_TOKEN loaded? {'Yes' if BOT_TOKEN else 'No'}")
-logging.info(f"CHAT_ID loaded? {'Yes' if CHAT_ID else 'No'}")
-logging.info(f"CMC_KEY loaded? {'Yes' if CMC_KEY else 'No'}")
-
-
 # ---------------- FETCHERS ----------------
-def fetch_cmc(limit=50):
-    if not CMC_KEY:
-        logging.error("❌ No CMC_KEY found in environment variables!")
-        return fetch_cmc_fallback()
-
-    headers = {"X-CMC_PRO_API_KEY": CMC_KEY}
-    try:
-        r = requests.get(
-            CMC_API,
-            params={"start": 1, "limit": limit, "convert": "USD"},
-            headers=headers,
-            timeout=10,
-        )
-
-        if r.status_code != 200:
-            logging.error(f"❌ CMC API failed: {r.status_code} {r.text}")
-            return fetch_cmc_fallback()
-
-        data = r.json().get("data", [])
-    except Exception as e:
-        logging.error(f"CMC API error: {e}")
-        return fetch_cmc_fallback()
-
-    tokens = []
-    for x in data:
-        try:
-            listed_str = x.get("date_added")
-            listed = None
-            if listed_str:
-                try:
-                    listed = datetime.fromisoformat(listed_str.replace("Z", "+00:00"))
-                except Exception:
-                    listed = None
-
-            tokens.append(
-                {
-                    "id": x.get("id"),
-                    "name": x.get("name"),
-                    "symbol": x.get("symbol", "UNK"),
-                    "price": float(x["quote"]["USD"]["price"]),
-                    "change": float(x["quote"]["USD"]["percent_change_24h"]),
-                    "supply": x.get("max_supply") or 0,
-                    "listed": listed,
-                }
-            )
-        except Exception as e:
-            logging.error(f"Parse error: {e}")
-    return tokens
-
-
-def fetch_cmc_fallback():
-    logging.warning("⚠️ Using fallback: scraping CMC /new/")
+def fetch_cmc_from_web(limit=20):
+    """Scrape new tokens directly from CoinMarketCap /new/ page"""
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
@@ -94,30 +36,48 @@ def fetch_cmc_fallback():
 
         tokens = []
         rows = soup.select("table tbody tr")
-        for row in rows[:20]:
+        for row in rows[:limit]:
             cols = row.find_all("td")
             if len(cols) < 5:
                 continue
-            symbol = cols[2].get_text(strip=True)
+
+            name_elem = cols[1].find("p")
+            symbol_elem = cols[2].find("p")
+            listed_elem = cols[5].find("span") if len(cols) > 5 else None
+
+            name = name_elem.get_text(strip=True) if name_elem else "Unknown"
+            symbol = symbol_elem.get_text(strip=True) if symbol_elem else "UNK"
+
             price_text = cols[3].get_text(strip=True).replace("$", "").replace(",", "")
             price = float(price_text) if price_text else 0
+
             change_text = cols[4].get_text(strip=True).replace("%", "")
-            change = float(change_text) if change_text else 0
+            try:
+                change = float(change_text)
+            except:
+                change = 0
+
+            listed = None
+            if listed_elem:
+                try:
+                    listed = datetime.strptime(listed_elem.get_text(strip=True), "%b %d, %Y")
+                except Exception:
+                    listed = datetime.now(UTC)
 
             tokens.append(
                 {
                     "id": None,
-                    "name": symbol,
+                    "name": name,
                     "symbol": symbol,
                     "price": price,
                     "change": change,
                     "supply": None,
-                    "listed": datetime.now(UTC),
+                    "listed": listed,
                 }
             )
         return tokens
     except Exception as e:
-        logging.error(f"CMC fallback error: {e}")
+        logging.error(f"CMC web scrape error: {e}")
         return []
 
 
@@ -129,16 +89,15 @@ def fetch_binance_alpha():
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
-        for link in soup.select("a.css-1ej4hfo"):  # Binance uses dynamic CSS classes
+        for link in soup.select("a.css-1ej4hfo"):
             title = link.get_text(strip=True)
             href = "https://www.binance.com" + link.get("href")
-            if "Will List" in title:  # filter only token listing announcements
+            if "Will List" in title:
                 results.append({"title": title, "url": href})
         return results
     except Exception as e:
         logging.error(f"Binance Alpha scrape error: {e}")
         return []
-
 
 # ---------------- FILTERS ----------------
 def token_filter(token):
@@ -152,7 +111,6 @@ def token_filter(token):
             return True
     return False
 
-
 def is_new_crypto(token):
     listed = token.get("listed")
     if not listed:
@@ -160,18 +118,15 @@ def is_new_crypto(token):
     age = datetime.now(UTC) - listed
     return age <= timedelta(days=60) and token_filter(token)
 
-
 # ---------------- ALERTS ----------------
 def cmc_link(token):
-    return f"https://coinmarketcap.com/currencies/{token['id']}/" if token["id"] else "https://coinmarketcap.com/new/"
-
+    return "https://coinmarketcap.com/new/"
 
 def dexscreener_link(symbol):
     return f"https://dexscreener.com/search?q={symbol}"
 
-
 def new_crypto_alert():
-    fresh = [t for t in fetch_cmc(100) if is_new_crypto(t)]
+    fresh = [t for t in fetch_cmc_from_web(30) if is_new_crypto(t)]
     if not fresh:
         return "✅ No new cryptos (≤60 days) match your filters."
 
@@ -181,11 +136,9 @@ def new_crypto_alert():
             f"{i}. 💎 {t['name']} ({t['symbol']}/USDT)\n"
             f"💰 Price: ${t['price']:.6f}\n"
             f"📈 24h Change: {t['change']:+.2f}%\n"
-            f"🔢 Supply: {t['supply']:,}\n"
             f"🔗 [CMC]({cmc_link(t)}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
         )
     return msg
-
 
 def alpha_alert():
     alphas = fetch_binance_alpha()
@@ -200,7 +153,6 @@ def alpha_alert():
         )
     return msg
 
-
 # ---------------- TELEGRAM ----------------
 def main_menu():
     return InlineKeyboardMarkup(
@@ -210,18 +162,15 @@ def main_menu():
         ]
     )
 
-
 def back_button():
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]]
     )
 
-
 def start_command(update: Update, context: CallbackContext):
     update.message.reply_text(
         "👋 Welcome! Choose an option:", reply_markup=main_menu(), parse_mode="Markdown"
     )
-
 
 def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -242,12 +191,10 @@ def button_handler(update: Update, context: CallbackContext):
             alpha_alert(), reply_markup=back_button(), parse_mode="Markdown"
         )
 
-
 # ---------------- FLASK ----------------
 @app.route("/")
 def home():
     return "Bot is running!"
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -255,7 +202,6 @@ def webhook():
     dispatcher = updater.dispatcher
     dispatcher.process_update(update)
     return "ok"
-
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
