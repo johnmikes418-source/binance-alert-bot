@@ -19,7 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 CMC_NEW_URL = "https://coinmarketcap.com/new/"
-BINANCE_ALPHA_URL = "https://www.binance.com/en/support/announcement/list/48"
+CMC_UPCOMING_URL = "https://coinmarketcap.com/upcoming/"
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
@@ -27,8 +27,8 @@ bot = Bot(token=BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
 
 # ---------------- FETCHERS ----------------
-def fetch_cmc_from_web(limit=20):
-    """Scrape new tokens directly from CoinMarketCap /new/ page"""
+def fetch_cmc_new(limit=20):
+    """Scrape new tokens from CoinMarketCap /new/ page"""
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
@@ -43,13 +43,15 @@ def fetch_cmc_from_web(limit=20):
 
             name_elem = cols[1].find("p")
             symbol_elem = cols[2].find("p")
-            listed_elem = cols[5].find("span") if len(cols) > 5 else None
 
             name = name_elem.get_text(strip=True) if name_elem else "Unknown"
             symbol = symbol_elem.get_text(strip=True) if symbol_elem else "UNK"
 
             price_text = cols[3].get_text(strip=True).replace("$", "").replace(",", "")
-            price = float(price_text) if price_text else 0
+            try:
+                price = float(price_text)
+            except:
+                price = 0
 
             change_text = cols[4].get_text(strip=True).replace("%", "")
             try:
@@ -57,46 +59,53 @@ def fetch_cmc_from_web(limit=20):
             except:
                 change = 0
 
-            listed = None
-            if listed_elem:
-                try:
-                    listed = datetime.strptime(listed_elem.get_text(strip=True), "%b %d, %Y")
-                except Exception:
-                    listed = datetime.now(UTC)
-
             tokens.append(
                 {
-                    "id": None,
                     "name": name,
                     "symbol": symbol,
                     "price": price,
                     "change": change,
                     "supply": None,
-                    "listed": listed,
                 }
             )
         return tokens
     except Exception as e:
-        logging.error(f"CMC web scrape error: {e}")
+        logging.error(f"CMC /new scrape error: {e}")
         return []
 
 
-def fetch_binance_alpha():
-    """Scrape Binance announcement page for upcoming token listings"""
+def fetch_cmc_upcoming(limit=20):
+    """Scrape upcoming tokens from CoinMarketCap /upcoming/ page"""
     try:
-        r = requests.get(BINANCE_ALPHA_URL, timeout=10)
+        r = requests.get(CMC_UPCOMING_URL, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
-        for link in soup.select("a.css-1ej4hfo"):
-            title = link.get_text(strip=True)
-            href = "https://www.binance.com" + link.get("href")
-            if "Will List" in title:
-                results.append({"title": title, "url": href})
+        rows = soup.select("table tbody tr")
+        for row in rows[:limit]:
+            cols = row.find_all("td")
+            if len(cols) < 3:
+                continue
+
+            name_elem = cols[1].find("p")
+            date_elem = cols[2]
+
+            name = name_elem.get_text(strip=True) if name_elem else "Unknown"
+            symbol = name.split(" ")[-1].replace("(", "").replace(")", "")
+            date_text = date_elem.get_text(strip=True)
+
+            results.append(
+                {
+                    "name": name,
+                    "symbol": symbol,
+                    "date": date_text,
+                    "url": CMC_UPCOMING_URL,
+                }
+            )
         return results
     except Exception as e:
-        logging.error(f"Binance Alpha scrape error: {e}")
+        logging.error(f"CMC /upcoming scrape error: {e}")
         return []
 
 # ---------------- FILTERS ----------------
@@ -111,45 +120,39 @@ def token_filter(token):
             return True
     return False
 
-def is_new_crypto(token):
-    listed = token.get("listed")
-    if not listed:
-        return False
-    age = datetime.now(UTC) - listed
-    return age <= timedelta(days=60) and token_filter(token)
-
 # ---------------- ALERTS ----------------
-def cmc_link(token):
-    return "https://coinmarketcap.com/new/"
+def cmc_link(symbol):
+    return f"https://coinmarketcap.com/currencies/{symbol.lower()}/"
 
 def dexscreener_link(symbol):
     return f"https://dexscreener.com/search?q={symbol}"
 
 def new_crypto_alert():
-    fresh = [t for t in fetch_cmc_from_web(30) if is_new_crypto(t)]
+    fresh = [t for t in fetch_cmc_new(30) if token_filter(t)]
     if not fresh:
-        return "✅ No new cryptos (≤60 days) match your filters."
+        return "✅ No new cryptos match your filters."
 
-    msg = f"🆕 New Crypto Alerts (≤60 days)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🆕 New Crypto Alerts\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(fresh, start=1):
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']}/USDT)\n"
             f"💰 Price: ${t['price']:.6f}\n"
             f"📈 24h Change: {t['change']:+.2f}%\n"
-            f"🔗 [CMC]({cmc_link(t)}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
+            f"🔗 [CMC]({cmc_link(t['symbol'])}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
         )
     return msg
 
 def alpha_alert():
-    alphas = fetch_binance_alpha()
+    alphas = fetch_cmc_upcoming(30)
     if not alphas:
-        return "🚀 No upcoming Binance Alpha listings right now."
+        return "🚀 No upcoming CMC listings right now."
 
-    msg = f"🚀 New Alpha Alerts (Upcoming Binance Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(alphas, start=1):
         msg += (
-            f"{i}. 💎 {t['title']}\n"
-            f"🔗 [More Info]({t['url']})\n\n"
+            f"{i}. 💎 {t['name']} ({t['symbol']})\n"
+            f"📅 First Listing: {t['date']}\n"
+            f"📌 More Info: [CMC Upcoming]({t['url']})\n\n"
         )
     return msg
 
