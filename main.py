@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timedelta
 from flask import Flask, request
 import imghdr2 as imghdr
+from bs4 import BeautifulSoup  # for fallback scraping
 
 # Fix PIL/telegram bug
 sys.modules["imghdr"] = imghdr
@@ -16,10 +17,10 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, Callback
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+CMC_KEY = os.getenv("COINMARKETCAP_KEY")
 
-BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr"
-COINGECKO_API = "https://api.coingecko.com/api/v3/coins/markets"
-DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/search"
+CMC_API = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+CMC_NEW_URL = "https://coinmarketcap.com/new/"  # fallback scrape
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
@@ -27,132 +28,79 @@ bot = Bot(token=BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
 
 
-# ---------------- SAFE FETCHERS ----------------
-def fetch_binance():
-    try:
-        r = requests.get(BINANCE_API, timeout=10)
-        try:
-            data = r.json()
-        except Exception:
-            logging.error(f"Binance not JSON: {r.text[:200]}")
-            return []
-
-        if not isinstance(data, list):
-            logging.error(f"Binance API error: {data}")
-            return []
-
-        return [
-            {
-                "symbol": x.get("symbol", "UNK"),
-                "price": float(x.get("lastPrice") or 0),
-                "change": float(x.get("priceChangePercent") or 0),
-                "supply": None,
-                "listed": None,
-            }
-            for x in data
-            if isinstance(x, dict)
-        ]
-    except Exception as e:
-        logging.error(f"Binance error: {e}")
-        return []
-
-
-def fetch_coingecko():
+# ---------------- FETCHERS ----------------
+def fetch_cmc(limit=50):
+    """Fetch tokens from CMC API"""
+    headers = {"X-CMC_PRO_API_KEY": CMC_KEY}
     try:
         r = requests.get(
-            COINGECKO_API,
-            params={
-                "vs_currency": "usd",
-                "order": "market_cap_desc",
-                "per_page": 50,
-                "page": 1,
-            },
+            CMC_API,
+            params={"start": 1, "limit": limit, "convert": "USD"},
+            headers=headers,
             timeout=10,
         )
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except Exception as e:
+        logging.error(f"CMC API error: {e}")
+        return fetch_cmc_fallback()
+
+    tokens = []
+    for x in data:
         try:
-            data = r.json()
-        except Exception:
-            logging.error(f"Coingecko not JSON: {r.text[:200]}")
-            return []
-
-        if not isinstance(data, list):
-            logging.error(f"Coingecko API error: {data}")
-            return []
-
-        result = []
-        for x in data:
-            if not isinstance(x, dict):
-                continue
-
-            listed_str = (
-                x.get("atl_date")
-                or x.get("ath_date")
-                or x.get("last_updated")
-            )
+            listed_str = x.get("date_added")
             listed = None
-            try:
-                if listed_str:
+            if listed_str:
+                try:
                     listed = datetime.fromisoformat(listed_str.replace("Z", ""))
-            except Exception:
-                listed = None
+                except Exception:
+                    listed = None
 
-            result.append(
+            tokens.append(
                 {
-                    "symbol": x.get("symbol", "UNK").upper(),
-                    "price": float(x.get("current_price") or 0),
-                    "change": float(x.get("price_change_percentage_24h") or 0),
+                    "symbol": x.get("symbol", "UNK"),
+                    "price": float(x["quote"]["USD"]["price"]),
+                    "change": float(x["quote"]["USD"]["percent_change_24h"]),
                     "supply": x.get("max_supply") or 0,
                     "listed": listed,
                 }
             )
-        return result
-    except Exception as e:
-        logging.error(f"Coingecko error: {e}")
-        return []
+        except Exception as e:
+            logging.error(f"Parse error: {e}")
+    return tokens
 
 
-def fetch_dexscreener():
+def fetch_cmc_fallback():
+    """Scrape CoinMarketCap new listings as fallback"""
     try:
-        tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]  # sample
-        result = []
-        for t in tokens:
-            r = requests.get(f"{DEXSCREENER_API}?q={t}", timeout=10)
-            try:
-                resp = r.json()
-            except Exception:
-                logging.error(f"Dexscreener not JSON: {r.text[:200]}")
+        r = requests.get(CMC_NEW_URL, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        tokens = []
+        rows = soup.select("table tbody tr")
+        for row in rows[:20]:
+            cols = row.find_all("td")
+            if len(cols) < 5:
                 continue
+            symbol = cols[2].get_text(strip=True)
+            price_text = cols[3].get_text(strip=True).replace("$", "").replace(",", "")
+            price = float(price_text) if price_text else 0
+            change_text = cols[4].get_text(strip=True).replace("%", "")
+            change = float(change_text) if change_text else 0
 
-            if not isinstance(resp, dict):
-                logging.error(f"Dexscreener API error for {t}: {resp}")
-                continue
-
-            pairs = resp.get("pairs", [])
-            if not isinstance(pairs, list):
-                continue
-
-            for p in pairs:
-                if not isinstance(p, dict):
-                    continue
-
-                listed = p.get("pairCreatedAt")
-                listed_dt = (
-                    datetime.utcfromtimestamp(listed // 1000)
-                    if listed
-                    else None
-                )
-                result.append(
-                    {
-                        "symbol": p.get("baseToken", {}).get("symbol", "UNK"),
-                        "price": float(p.get("priceUsd") or 0),
-                        "change": float(p.get("priceChange", {}).get("h24") or 0),
-                        "supply": None,
-                        "listed": listed_dt,
-                    }
-                )
-        return result
+            tokens.append(
+                {
+                    "symbol": symbol,
+                    "price": price,
+                    "change": change,
+                    "supply": None,
+                    "listed": datetime.utcnow(),  # fallback has no date
+                }
+            )
+        return tokens
     except Exception as e:
-        logging.error(f"Dexscreener error: {e}")
+        logging.error(f"CMC fallback error: {e}")
         return []
 
 
@@ -180,7 +128,7 @@ def is_new_crypto(token):
 
 
 def is_alpha(token):
-    """≤ 7 days old (ignore price filter)"""
+    """≤ 7 days old (ignore filter)"""
     listed = token.get("listed")
     if not listed:
         return False
@@ -191,7 +139,7 @@ def is_alpha(token):
 # ---------------- ALERTS ----------------
 def check_tokens():
     results = []
-    for token in fetch_binance() + fetch_coingecko() + fetch_dexscreener():
+    for token in fetch_cmc(100):
         if abs(token["change"]) >= 5 and token_filter(token):
             results.append(token)
 
@@ -200,15 +148,12 @@ def check_tokens():
 
     msg = f"📊 Token Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
     for t in results:
-        msg += (
-            f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%\n"
-        )
+        msg += f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%\n"
     return msg
 
 
 def new_crypto_alert():
-    data = fetch_coingecko() + fetch_dexscreener()
-    fresh = [t for t in data if is_new_crypto(t)]
+    fresh = [t for t in fetch_cmc(100) if is_new_crypto(t)]
     if not fresh:
         return "✅ No new cryptos in last 60 days match your filters."
     msg = f"🆕 New Crypto (≤60 days) ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
@@ -218,8 +163,7 @@ def new_crypto_alert():
 
 
 def alpha_alert():
-    data = fetch_coingecko() + fetch_dexscreener()
-    alphas = [t for t in data if is_alpha(t)]
+    alphas = [t for t in fetch_cmc(100) if is_alpha(t)]
     if not alphas:
         return "🚀 No new alpha listings yet."
     msg = f"🚀 New Alpha Alerts ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}):\n\n"
@@ -233,9 +177,7 @@ def main_menu():
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
-            [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
-            [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
-            [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
+            [InlineKeyboardButton("💰 CMC Top", callback_data="cmc")],
             [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
             [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
         ]
@@ -264,33 +206,10 @@ def button_handler(update: Update, context: CallbackContext):
     elif query.data == "check_tokens":
         query.edit_message_text(check_tokens(), reply_markup=back_button())
 
-    elif query.data == "binance":
-        data = fetch_binance()[:5]
-        msg = "📊 Binance Top Tokens:\n\n" + "\n".join(
-            [
-                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
-                for t in data
-            ]
-        )
-        query.edit_message_text(msg or "No data.", reply_markup=back_button())
-
-    elif query.data == "coingecko":
-        data = fetch_coingecko()[:5]
-        msg = "🌐 CoinGecko Top:\n\n" + "\n".join(
-            [
-                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
-                for t in data
-            ]
-        )
-        query.edit_message_text(msg or "No data.", reply_markup=back_button())
-
-    elif query.data == "dexscreener":
-        data = fetch_dexscreener()
-        msg = "🦄 Dexscreener:\n\n" + "\n".join(
-            [
-                f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%"
-                for t in data
-            ]
+    elif query.data == "cmc":
+        data = fetch_cmc(10)
+        msg = "💰 CMC Top Tokens:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
         )
         query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
