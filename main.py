@@ -245,3 +245,21 @@ def alpha_alert():
             f"🔗 [More Info]({t['url']})\n\n"
         )
     return msg
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+def send_alerts():
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=new_crypto_alert(), parse_mode="Markdown", disable_web_page_preview=True)
+        bot.send_message(chat_id=CHAT_ID, text=alpha_alert(), parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        logging.error(f"Telegram alert failed: {e}")
+
+if __name__ == "__main__":
+    # Start scheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(send_alerts, "interval", minutes=60)
+    scheduler.start()
+
+    # Run Flask server (to keep the app alive on Render)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
