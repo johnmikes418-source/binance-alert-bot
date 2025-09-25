@@ -113,12 +113,52 @@ def start_command(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("Welcome! Tap below to check tokens:", reply_markup=reply_markup)
 
+def main_menu_keyboard():
+    """Reusable keyboard for going back to menu"""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]]
+    )
+
 def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
-    if query.data == "check_tokens":
+
+    if query.data == "menu":
+        # Show main menu again
+        keyboard = [
+            [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
+            [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
+            [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
+            [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text("👋 Back to main menu:", reply_markup=reply_markup)
+
+    elif query.data == "check_tokens":
         msg = check_tokens()
-        query.edit_message_text(text=msg)
+        query.edit_message_text(text=msg, reply_markup=main_menu_keyboard())
+
+    elif query.data == "binance":
+        data = fetch_binance()[:5]
+        msg = "📊 Binance Top Tokens:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+        )
+        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+
+    elif query.data == "coingecko":
+        data = fetch_coingecko()[:5]
+        msg = "🌐 CoinGecko Top Tokens:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+        )
+        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+
+    elif query.data == "dexscreener":
+        data = fetch_dexscreener()
+        msg = "🦄 Dexscreener Tokens:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+        )
+        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+
 
 def run_telegram_bot():
     updater = Updater(BOT_TOKEN, use_context=True)
