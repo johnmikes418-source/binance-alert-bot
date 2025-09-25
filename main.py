@@ -27,19 +27,30 @@ bot = Bot(token=BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
 
 
-# ---------------- FETCHERS ----------------
+# ---------------- SAFE FETCHERS ----------------
 def fetch_binance():
     try:
-        r = requests.get(BINANCE_API, timeout=10).json()
+        r = requests.get(BINANCE_API, timeout=10)
+        try:
+            data = r.json()
+        except Exception:
+            logging.error(f"Binance not JSON: {r.text[:200]}")
+            return []
+
+        if not isinstance(data, list):
+            logging.error(f"Binance API error: {data}")
+            return []
+
         return [
             {
-                "symbol": x["symbol"],
-                "price": float(x["lastPrice"]),
-                "change": float(x["priceChangePercent"]),
+                "symbol": x.get("symbol", "UNK"),
+                "price": float(x.get("lastPrice") or 0),
+                "change": float(x.get("priceChangePercent") or 0),
                 "supply": None,
-                "listed": None,  # Binance ticker has no listing date
+                "listed": None,
             }
-            for x in r
+            for x in data
+            if isinstance(x, dict)
         ]
     except Exception as e:
         logging.error(f"Binance error: {e}")
@@ -57,10 +68,22 @@ def fetch_coingecko():
                 "page": 1,
             },
             timeout=10,
-        ).json()
+        )
+        try:
+            data = r.json()
+        except Exception:
+            logging.error(f"Coingecko not JSON: {r.text[:200]}")
+            return []
 
-        data = []
-        for x in r:
+        if not isinstance(data, list):
+            logging.error(f"Coingecko API error: {data}")
+            return []
+
+        result = []
+        for x in data:
+            if not isinstance(x, dict):
+                continue
+
             listed_str = (
                 x.get("atl_date")
                 or x.get("ath_date")
@@ -69,22 +92,20 @@ def fetch_coingecko():
             listed = None
             try:
                 if listed_str:
-                    listed = datetime.fromisoformat(
-                        listed_str.replace("Z", "")
-                    )
+                    listed = datetime.fromisoformat(listed_str.replace("Z", ""))
             except Exception:
                 listed = None
 
-            data.append(
+            result.append(
                 {
-                    "symbol": x["symbol"].upper(),
+                    "symbol": x.get("symbol", "UNK").upper(),
                     "price": float(x.get("current_price") or 0),
                     "change": float(x.get("price_change_percentage_24h") or 0),
                     "supply": x.get("max_supply") or 0,
                     "listed": listed,
                 }
             )
-        return data
+        return result
     except Exception as e:
         logging.error(f"Coingecko error: {e}")
         return []
@@ -93,29 +114,43 @@ def fetch_coingecko():
 def fetch_dexscreener():
     try:
         tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]  # sample
-        data = []
+        result = []
         for t in tokens:
-            r = requests.get(f"{DEXSCREENER_API}?q={t}", timeout=10).json()
-            pairs = r.get("pairs", [])
+            r = requests.get(f"{DEXSCREENER_API}?q={t}", timeout=10)
+            try:
+                resp = r.json()
+            except Exception:
+                logging.error(f"Dexscreener not JSON: {r.text[:200]}")
+                continue
+
+            if not isinstance(resp, dict):
+                logging.error(f"Dexscreener API error for {t}: {resp}")
+                continue
+
+            pairs = resp.get("pairs", [])
+            if not isinstance(pairs, list):
+                continue
+
             for p in pairs:
+                if not isinstance(p, dict):
+                    continue
+
                 listed = p.get("pairCreatedAt")
                 listed_dt = (
                     datetime.utcfromtimestamp(listed // 1000)
                     if listed
                     else None
                 )
-                data.append(
+                result.append(
                     {
                         "symbol": p.get("baseToken", {}).get("symbol", "UNK"),
                         "price": float(p.get("priceUsd") or 0),
-                        "change": float(
-                            p.get("priceChange", {}).get("h24") or 0
-                        ),
+                        "change": float(p.get("priceChange", {}).get("h24") or 0),
                         "supply": None,
                         "listed": listed_dt,
                     }
                 )
-        return data
+        return result
     except Exception as e:
         logging.error(f"Dexscreener error: {e}")
         return []
