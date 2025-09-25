@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+import threading
 from flask import Flask, request
 import imghdr2 as imghdr
 import sys
@@ -108,14 +109,9 @@ def check_tokens():
 
 # ---------------- TELEGRAM ----------------
 def start_command(update: Update, context: CallbackContext):
-    keyboard = [
-        [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
-        [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
-        [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
-        [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
-    ]
+    keyboard = [[InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Welcome! Choose an option:", reply_markup=reply_markup)
+    update.message.reply_text("Welcome! Tap below to check tokens:", reply_markup=reply_markup)
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup(
@@ -127,7 +123,14 @@ def button_handler(update: Update, context: CallbackContext):
     query.answer()
 
     if query.data == "menu":
-        start_command(query, context)
+        keyboard = [
+            [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
+            [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
+            [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
+            [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text("👋 Back to main menu:", reply_markup=reply_markup)
 
     elif query.data == "check_tokens":
         msg = check_tokens()
@@ -154,6 +157,14 @@ def button_handler(update: Update, context: CallbackContext):
         )
         query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
 
+
+def run_telegram_bot():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CallbackQueryHandler(button_handler))
+    updater.start_polling()
+
 # ---------------- FLASK ----------------
 @app.route("/")
 def home():
@@ -163,22 +174,38 @@ def home():
 def ping():
     return "✅ Bot is alive."
 
+@app.route("/start")
+def trigger_start():
+    msg = check_tokens()
+    return msg
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), updater.bot)
-    dp.process_update(update)
-    return "ok", 200
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher = updater.dispatcher
+    dispatcher.process_update(update)
+    return "ok"
 
 # ---------------- MAIN ----------------
-updater = Updater(BOT_TOKEN, use_context=True)
-dp = updater.dispatcher
-dp.add_handler(CommandHandler("start", start_command))
-dp.add_handler(CallbackQueryHandler(button_handler))
-
-WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
-
 if __name__ == "__main__":
-    updater.bot.delete_webhook()
-    updater.bot.set_webhook(WEBHOOK_URL)
+    PORT = int(os.getenv("PORT", 5000))
+    HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    if HOSTNAME:  # Running on Render
+        WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
+        logging.info(f"Setting webhook to {WEBHOOK_URL}")
+
+        updater = Updater(BOT_TOKEN, use_context=True)
+        dp = updater.dispatcher
+        dp.add_handler(CommandHandler("start", start_command))
+        dp.add_handler(CallbackQueryHandler(button_handler))
+
+        updater.bot.set_webhook(WEBHOOK_URL)
+
+        app.run(host="0.0.0.0", port=PORT)
+
+    else:  # Local development (polling + flask)
+        bot_thread = threading.Thread(target=run_telegram_bot)
+        bot_thread.daemon = True
+        bot_thread.start()
+        app.run(host="0.0.0.0", port=PORT)
