@@ -1,11 +1,13 @@
 import os
+import sys
 import requests
 import logging
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, request
 import imghdr2 as imghdr
-import sys
+
+# Fix PIL/telegram bug
 sys.modules["imghdr"] = imghdr
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -15,9 +17,9 @@ from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, Callback
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-binance_api = "https://api.binance.com/api/v3/ticker/24hr"
-coingecko_api = "https://api.coingecko.com/api/v3/coins/markets"
-dexscreener_api = "https://api.dexscreener.com/latest/dex/tokens"
+BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr"
+COINGECKO_API = "https://api.coingecko.com/api/v3/coins/markets"
+DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 
 app = Flask(__name__)
 bot = Bot(token=BOT_TOKEN)
@@ -27,14 +29,14 @@ logging.basicConfig(level=logging.INFO)
 # ---------------- FETCHERS ----------------
 def fetch_binance():
     try:
-        r = requests.get(binance_api, timeout=10).json()
+        r = requests.get(BINANCE_API, timeout=10).json()
         return [
             {
                 "symbol": x["symbol"],
                 "price": float(x["lastPrice"]),
                 "change": float(x["priceChangePercent"]),
                 "supply": None,
-                "listed": None,  # Binance doesn’t give listing date
+                "listed": None,  # Binance ticker has no listing date
             }
             for x in r
         ]
@@ -45,7 +47,7 @@ def fetch_binance():
 def fetch_coingecko():
     try:
         r = requests.get(
-            coingecko_api,
+            COINGECKO_API,
             params={"vs_currency": "usd", "order": "market_cap_desc", "per_page": 50, "page": 1},
             timeout=10,
         ).json()
@@ -55,7 +57,7 @@ def fetch_coingecko():
                 "price": float(x["current_price"]),
                 "change": float(x["price_change_percentage_24h"] or 0),
                 "supply": x.get("max_supply") or 0,
-                "listed": x.get("ath_date") or x.get("last_updated"),  # fallback
+                "listed": x.get("ath_date") or x.get("last_updated"),
             }
             for x in r
         ]
@@ -65,10 +67,10 @@ def fetch_coingecko():
 
 def fetch_dexscreener():
     try:
-        tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]
+        tokens = ["0x0d4890ecEc59cd55D640d36f7acc6F7F512Fdb6e"]  # sample token list
         data = []
         for t in tokens:
-            r = requests.get(f"{dexscreener_api}/{t}", timeout=10).json()
+            r = requests.get(f"{DEXSCREENER_API}/{t}", timeout=10).json()
             pairs = r.get("pairs", [])
             for p in pairs:
                 listed = p.get("pairCreatedAt")
@@ -96,11 +98,10 @@ def token_filter(token):
             return True
         if supply <= 10_000_000_000 and 0.002 <= price <= 0.005:
             return True
-        return False
-    return False  # skip if no supply
+    return False
 
 def is_new_crypto(token):
-    """≤ 60 days old and matches supply–price filter"""
+    """≤ 60 days old + passes filter"""
     listed = token.get("listed")
     if not listed:
         return False
@@ -113,7 +114,7 @@ def is_new_crypto(token):
     return age <= timedelta(days=60) and token_filter(token)
 
 def is_alpha(token):
-    """New/prelaunch tokens (just use 'listed' ≤ 7 days, no price filter)"""
+    """≤ 7 days old (ignore price filter)"""
     listed = token.get("listed")
     if not listed:
         return False
@@ -125,7 +126,7 @@ def is_alpha(token):
     age = datetime.utcnow() - listed
     return age <= timedelta(days=7)
 
-# ---------------- ALERT ----------------
+# ---------------- ALERTS ----------------
 def check_tokens():
     results = []
     for token in fetch_binance() + fetch_coingecko() + fetch_dexscreener():
@@ -161,62 +162,58 @@ def alpha_alert():
     return msg
 
 # ---------------- TELEGRAM ----------------
-def start_command(update: Update, context: CallbackContext):
-    keyboard = [
+def main_menu():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔍 Check Tokens", callback_data="check_tokens")],
         [InlineKeyboardButton("💰 Binance Top", callback_data="binance")],
         [InlineKeyboardButton("🌐 CoinGecko Top", callback_data="coingecko")],
         [InlineKeyboardButton("🦄 Dexscreener Token", callback_data="dexscreener")],
         [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
         [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Welcome! Choose an option:", reply_markup=reply_markup)
+    ])
 
-def main_menu_keyboard():
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]]
-    )
+def back_button():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]])
+
+def start_command(update: Update, context: CallbackContext):
+    update.message.reply_text("👋 Welcome! Choose an option:", reply_markup=main_menu())
 
 def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
 
     if query.data == "menu":
-        start_command(query, context)
+        query.edit_message_text("👋 Back to menu:", reply_markup=main_menu())
 
     elif query.data == "check_tokens":
-        msg = check_tokens()
-        query.edit_message_text(text=msg, reply_markup=main_menu_keyboard())
+        query.edit_message_text(check_tokens(), reply_markup=back_button())
 
     elif query.data == "binance":
         data = fetch_binance()[:5]
         msg = "📊 Binance Top Tokens:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
         )
-        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+        query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "coingecko":
         data = fetch_coingecko()[:5]
-        msg = "🌐 CoinGecko Top Tokens:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+        msg = "🌐 CoinGecko Top:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
         )
-        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+        query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "dexscreener":
         data = fetch_dexscreener()
-        msg = "🦄 Dexscreener Tokens:\n\n" + "\n".join(
-            [f"🔹 {t['symbol']} | 💵 ${t['price']:.6f} | 📈 {t['change']}%" for t in data]
+        msg = "🦄 Dexscreener:\n\n" + "\n".join(
+            [f"🔹 {t['symbol']} | ${t['price']:.6f} | {t['change']}%" for t in data]
         )
-        query.edit_message_text(text=msg or "No data available.", reply_markup=main_menu_keyboard())
+        query.edit_message_text(msg or "No data.", reply_markup=back_button())
 
     elif query.data == "new_crypto":
-        msg = new_crypto_alert()
-        query.edit_message_text(text=msg, reply_markup=main_menu_keyboard())
+        query.edit_message_text(new_crypto_alert(), reply_markup=back_button())
 
     elif query.data == "alpha":
-        msg = alpha_alert()
-        query.edit_message_text(text=msg, reply_markup=main_menu_keyboard())
+        query.edit_message_text(alpha_alert(), reply_markup=back_button())
 
 # ---------------- FLASK ----------------
 @app.route("/")
@@ -235,25 +232,17 @@ if __name__ == "__main__":
     PORT = int(os.getenv("PORT", 5000))
     HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start_command))
+    dp.add_handler(CallbackQueryHandler(button_handler))
+
     if HOSTNAME:  # Running on Render
         WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
         logging.info(f"Setting webhook to {WEBHOOK_URL}")
-
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
-        dp.add_handler(CommandHandler("start", start_command))
-        dp.add_handler(CallbackQueryHandler(button_handler))
-
         updater.bot.set_webhook(WEBHOOK_URL)
-
         app.run(host="0.0.0.0", port=PORT)
-
-    else:  # Local development
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
-        dp.add_handler(CommandHandler("start", start_command))
-        dp.add_handler(CallbackQueryHandler(button_handler))
-
+    else:  # Local dev
         bot_thread = threading.Thread(target=updater.start_polling)
         bot_thread.daemon = True
         bot_thread.start()
