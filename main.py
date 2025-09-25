@@ -2,7 +2,7 @@ import os
 import sys
 import requests
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from flask import Flask, request
 import imghdr2 as imghdr
 from bs4 import BeautifulSoup
@@ -99,7 +99,6 @@ def fetch_cmc_new(limit=20):
         logging.error(f"CMC /new scrape error: {e}")
         return []
 
-
 def fetch_cmc_upcoming(limit=20):
     """Scrape upcoming tokens from CoinMarketCap /upcoming/ page"""
     try:
@@ -124,6 +123,7 @@ def fetch_cmc_upcoming(limit=20):
             listing_date = None
             try:
                 listing_date = datetime.strptime(date_elem, "%b %d, %Y")
+                listing_date = listing_date.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logging.debug(f"Could not parse listing date: {date_elem} ({e})")
 
@@ -141,7 +141,6 @@ def fetch_cmc_upcoming(limit=20):
         logging.error(f"CMC /upcoming scrape error: {e}")
         return []
 
-
 def fetch_binance_alpha(limit=20):
     """Scrape Binance Alpha page for upcoming tokens"""
     try:
@@ -150,18 +149,19 @@ def fetch_binance_alpha(limit=20):
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
-        cards = soup.select("a.css-1ej4hfo")  # Binance Alpha token cards
+        cards = soup.select("a[href*='/en/trade/']")
         for card in cards[:limit]:
             name = card.get("title", "Unknown")
             symbol = name.split(" ")[0]
             url = "https://www.binance.com" + card["href"]
 
-            # Try to extract date if available inside card
-            date_elem = card.find("div", string=lambda t: t and any(m in t for m in ["2025", "2026"]))
+            # Try to extract date if available
+            date_elem = card.find("div", string=lambda t: t and any(y in t for y in ["2025", "2026"]))
             listing_date = None
             if date_elem:
                 try:
                     listing_date = datetime.strptime(date_elem.get_text(strip=True), "%Y-%m-%d")
+                    listing_date = listing_date.replace(tzinfo=timezone.utc)
                 except:
                     pass
 
@@ -185,14 +185,11 @@ def token_filter(token):
     supply = token["supply"]
 
     if supply:
-        # Case 1: Supply ≤ 1B
         if supply <= 1_000_000_000 and 0.005 <= price <= 0.05:
             return True
-        # Case 2: Supply ≤ 10B
         if supply <= 10_000_000_000 and 0.0005 <= price <= 0.005:
             return True
     else:
-        # Accept very cheap coins even without supply data
         if price <= 0.05:
             return True
     return False
@@ -200,7 +197,7 @@ def token_filter(token):
 def alpha_filter(token):
     """Skip past or >30d future listings"""
     if token["date"]:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         delta = (token["date"] - now).days
         if delta < 0 or delta > 30:
             return False
@@ -218,13 +215,14 @@ def new_crypto_alert():
     if not fresh:
         return "✅ No new cryptos match your filters."
 
-    msg = f"🆕 New Crypto Alerts\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🆕 New Crypto Alerts\n{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(fresh, start=1):
+        supply_str = f"{t['supply']:,}" if t["supply"] else "?"
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']}/USDT)\n"
             f"💰 Price: ${t['price']:.6f}\n"
             f"📈 24h Change: {t['change']:+.2f}%\n"
-            f"🔄 Supply: {t['supply']:,} \n"
+            f"🔄 Supply: {supply_str}\n"
             f"🔗 [CMC]({cmc_link(t['symbol'])}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
         )
     return msg
@@ -237,11 +235,9 @@ def alpha_alert():
     if not alphas:
         return "🚀 No valid upcoming listings right now."
 
-    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(alphas, start=1):
-        date_str = (
-            t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown date"
-        )
+        date_str = t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown date"
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']})\n"
             f"📅 First Listing: {date_str}\n"
