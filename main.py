@@ -4,6 +4,7 @@ import requests
 import logging
 from datetime import datetime, timezone
 from flask import Flask, request
+from apscheduler.schedulers.background import BackgroundScheduler
 import imghdr2 as imghdr
 from bs4 import BeautifulSoup
 
@@ -245,7 +246,17 @@ def alpha_alert():
             f"🔗 [More Info]({t['url']})\n\n"
         )
     return msg
-    from apscheduler.schedulers.background import BackgroundScheduler
+   
+from apscheduler.schedulers.background import BackgroundScheduler  # ✅ Keep this at the top
+
+# ---------------- ALERTS ----------------
+def cmc_link(symbol):
+    return f"https://coinmarketcap.com/currencies/{symbol.lower()}/"
+
+def dexscreener_link(symbol):
+    return f"https://dexscreener.com/search?q={symbol}"
+
+# (keep the rest of your alert functions here...)
 
 def send_alerts():
     try:
@@ -254,12 +265,12 @@ def send_alerts():
     except Exception as e:
         logging.error(f"Telegram alert failed: {e}")
 
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
-    # Start scheduler
+    # ✅ Start scheduler
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_alerts, "interval", minutes=60)
     scheduler.start()
 
-    # Run Flask server (to keep the app alive on Render)
+    # ✅ Start Flask app to keep Render alive
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
