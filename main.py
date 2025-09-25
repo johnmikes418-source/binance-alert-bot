@@ -2,8 +2,7 @@ import os
 import sys
 import requests
 import logging
-import threading
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, UTC
 from flask import Flask, request
 import imghdr2 as imghdr
 from bs4 import BeautifulSoup
@@ -27,34 +26,33 @@ bot = Bot(token=BOT_TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
+# ---------------- HEALTH ROUTE ----------------
+@app.route("/")
+def home():
+    return "✅ Bot is running", 200
+
 # ---------------- HELPERS ----------------
-def fetch_supply(coin_url):
-    """Scrape max supply from an individual CMC coin page"""
+def fetch_max_supply(symbol):
+    """Fetch max supply from individual CMC coin page"""
     try:
-        r = requests.get(coin_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        url = f"https://coinmarketcap.com/currencies/{symbol.lower()}/"
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
         supply_elem = soup.find("div", string=lambda t: t and "Max Supply" in t)
-        if not supply_elem:
-            return None
-
-        sibling = supply_elem.find_next("div")
-        if not sibling:
-            return None
-
-        raw = sibling.get_text(strip=True).replace(",", "").replace("∞", "")
-        try:
-            return float(raw.split(" ")[0])
-        except:
-            return None
+        if supply_elem:
+            val_elem = supply_elem.find_next("div")
+            if val_elem:
+                raw = val_elem.get_text(strip=True).replace(",", "").split(" ")[0]
+                return float(raw)
     except Exception as e:
-        logging.warning(f"Supply scrape error for {coin_url}: {e}")
-        return None
+        logging.warning(f"Supply fetch failed for {symbol}: {e}")
+    return None
 
 # ---------------- FETCHERS ----------------
 def fetch_cmc_new(limit=20):
-    """Scrape new tokens from CoinMarketCap /new/ page (with supply details)"""
+    """Scrape new tokens from CoinMarketCap /new/ page"""
     try:
         r = requests.get(CMC_NEW_URL, timeout=10)
         r.raise_for_status()
@@ -66,9 +64,6 @@ def fetch_cmc_new(limit=20):
             cols = row.find_all("td")
             if len(cols) < 5:
                 continue
-
-            link_elem = cols[1].find("a", href=True)
-            coin_url = f"https://coinmarketcap.com{link_elem['href']}" if link_elem else None
 
             name_elem = cols[1].find("p")
             symbol_elem = cols[2].find("p")
@@ -88,7 +83,7 @@ def fetch_cmc_new(limit=20):
             except:
                 change = 0
 
-            supply = fetch_supply(coin_url) if coin_url else None
+            supply = fetch_max_supply(symbol)
 
             tokens.append(
                 {
@@ -97,13 +92,13 @@ def fetch_cmc_new(limit=20):
                     "price": price,
                     "change": change,
                     "supply": supply,
-                    "url": coin_url,
                 }
             )
         return tokens
     except Exception as e:
         logging.error(f"CMC /new scrape error: {e}")
         return []
+
 
 def fetch_cmc_upcoming(limit=20):
     """Scrape upcoming tokens from CoinMarketCap /upcoming/ page"""
@@ -120,17 +115,17 @@ def fetch_cmc_upcoming(limit=20):
                 continue
 
             name_elem = cols[1].find("p")
-            date_elem = cols[2]
+            date_elem = cols[2].get_text(strip=True)
 
             name = name_elem.get_text(strip=True) if name_elem else "Unknown"
             symbol = name.split(" ")[-1].replace("(", "").replace(")", "")
-            date_text = date_elem.get_text(strip=True)
 
+            # Parse date if possible
             listing_date = None
             try:
-                listing_date = datetime.strptime(date_text, "%b %d, %Y")
-            except:
-                pass
+                listing_date = datetime.strptime(date_elem, "%b %d, %Y")
+            except Exception as e:
+                logging.debug(f"Could not parse listing date: {date_elem} ({e})")
 
             results.append(
                 {
@@ -146,6 +141,7 @@ def fetch_cmc_upcoming(limit=20):
         logging.error(f"CMC /upcoming scrape error: {e}")
         return []
 
+
 def fetch_binance_alpha(limit=20):
     """Scrape Binance Alpha page for upcoming tokens"""
     try:
@@ -154,17 +150,26 @@ def fetch_binance_alpha(limit=20):
         soup = BeautifulSoup(r.text, "html.parser")
 
         results = []
-        cards = soup.select("a.css-1ej4hfo, a.css-17wnpgm")  # Binance Alpha token cards
+        cards = soup.select("a.css-1ej4hfo")  # Binance Alpha token cards
         for card in cards[:limit]:
-            name = card.get("title", "Unknown") or card.get_text(strip=True)
+            name = card.get("title", "Unknown")
             symbol = name.split(" ")[0]
             url = "https://www.binance.com" + card["href"]
+
+            # Try to extract date if available inside card
+            date_elem = card.find("div", string=lambda t: t and any(m in t for m in ["2025", "2026"]))
+            listing_date = None
+            if date_elem:
+                try:
+                    listing_date = datetime.strptime(date_elem.get_text(strip=True), "%Y-%m-%d")
+                except:
+                    pass
 
             results.append(
                 {
                     "name": name,
                     "symbol": symbol,
-                    "date": None,
+                    "date": listing_date,
                     "url": url,
                     "source": "Binance Alpha",
                 }
@@ -179,15 +184,17 @@ def token_filter(token):
     price = token["price"]
     supply = token["supply"]
 
-    if not supply:
-        return False
-
-    # Case 1: Supply ≤ 1B
-    if supply <= 1_000_000_000 and 0.005 <= price <= 0.05:
-        return True
-    # Case 2: Supply ≤ 10B
-    if supply <= 10_000_000_000 and 0.0005 <= price <= 0.005:
-        return True
+    if supply:
+        # Case 1: Supply ≤ 1B
+        if supply <= 1_000_000_000 and 0.005 <= price <= 0.05:
+            return True
+        # Case 2: Supply ≤ 10B
+        if supply <= 10_000_000_000 and 0.0005 <= price <= 0.005:
+            return True
+    else:
+        # Accept very cheap coins even without supply data
+        if price <= 0.05:
+            return True
     return False
 
 def alpha_filter(token):
@@ -218,13 +225,13 @@ def new_crypto_alert():
             f"💰 Price: ${t['price']:.6f}\n"
             f"📈 24h Change: {t['change']:+.2f}%\n"
             f"🔄 Supply: {t['supply']:,} \n"
-            f"🔗 [CMC]({t['url']}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
+            f"🔗 [CMC]({cmc_link(t['symbol'])}) | [DexScreener]({dexscreener_link(t['symbol'])})\n\n"
         )
     return msg
 
 def alpha_alert():
     cmc = [t for t in fetch_cmc_upcoming(30) if alpha_filter(t)]
-    binance = fetch_binance_alpha(20)
+    binance = [t for t in fetch_binance_alpha(20) if alpha_filter(t)]
 
     alphas = cmc + binance
     if not alphas:
@@ -233,7 +240,7 @@ def alpha_alert():
     msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(alphas, start=1):
         date_str = (
-            t["date"].strftime("%Y-%m-%d") if t["date"] else "Recently Added"
+            t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown date"
         )
         msg += (
             f"{i}. 💎 {t['name']} ({t['symbol']})\n"
@@ -242,72 +249,3 @@ def alpha_alert():
             f"🔗 [More Info]({t['url']})\n\n"
         )
     return msg
-
-# ---------------- TELEGRAM ----------------
-def main_menu():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🆕 New Crypto", callback_data="new_crypto")],
-            [InlineKeyboardButton("🚀 New Alpha Alert", callback_data="alpha")],
-        ]
-    )
-
-def back_button():
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")]]
-    )
-
-def start_command(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "👋 Welcome! Choose an option:", reply_markup=main_menu(), parse_mode="Markdown"
-    )
-
-def button_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    if query.data == "menu":
-        query.edit_message_text(
-            "👋 Back to menu:", reply_markup=main_menu(), parse_mode="Markdown"
-        )
-    elif query.data == "new_crypto":
-        query.edit_message_text(
-            new_crypto_alert(), reply_markup=back_button(), parse_mode="Markdown"
-        )
-    elif query.data == "alpha":
-        query.edit_message_text(
-            alpha_alert(), reply_markup=back_button(), parse_mode="Markdown"
-        )
-
-# ---------------- FLASK ----------------
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher = updater.dispatcher
-    dispatcher.process_update(update)
-    return "ok"
-
-# ---------------- MAIN ----------------
-if __name__ == "__main__":
-    PORT = int(os.getenv("PORT", 5000))
-    HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start_command))
-    dp.add_handler(CallbackQueryHandler(button_handler))
-
-    if HOSTNAME:
-        WEBHOOK_URL = f"https://{HOSTNAME}/webhook"
-        logging.info(f"Setting webhook to {WEBHOOK_URL}")
-        updater.bot.set_webhook(WEBHOOK_URL)
-        app.run(host="0.0.0.0", port=PORT)
-    else:
-        bot_thread = threading.Thread(target=updater.start_polling)
-        bot_thread.daemon = True
-        bot_thread.start()
-        app.run(host="0.0.0.0", port=PORT)
