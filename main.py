@@ -2,7 +2,8 @@ import os
 import sys
 import requests
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+import pytz
 from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 import imghdr2 as imghdr
@@ -198,7 +199,7 @@ def token_filter(token):
 def alpha_filter(token):
     """Skip past or >30d future listings"""
     if token["date"]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(pytz.utc)
         delta = (token["date"] - now).days
         if delta < 0 or delta > 30:
             return False
@@ -216,7 +217,7 @@ def new_crypto_alert():
     if not fresh:
         return "✅ No new cryptos match your filters."
 
-    msg = f"🆕 New Crypto Alerts\n{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🆕 New Crypto Alerts\n{datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(fresh, start=1):
         supply_str = f"{t['supply']:,}" if t["supply"] else "?"
         msg += (
@@ -236,7 +237,7 @@ def alpha_alert():
     if not alphas:
         return "🚀 No valid upcoming listings right now."
 
-    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+    msg = f"🚀 New Alpha Alerts (Upcoming Listings)\n{datetime.now(pytz.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
     for i, t in enumerate(alphas, start=1):
         date_str = t["date"].strftime("%Y-%m-%d") if t["date"] else "Unknown date"
         msg += (
