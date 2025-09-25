@@ -3,6 +3,10 @@ import requests
 import logging
 import threading
 from flask import Flask
+import imghdr2 as imghdr
+import sys
+sys.modules["imghdr"] = imghdr
+
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
 
