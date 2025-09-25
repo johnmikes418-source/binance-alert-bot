@@ -11,4 +11,5 @@ services:
         sync: false
       - key: CHAT_ID
         sync: false
-    pythonVersion: 3.11.9
+   pythonVersion: 3.12.6
+
